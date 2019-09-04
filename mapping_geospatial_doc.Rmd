@@ -1,0 +1,260 @@
+---
+title: "Mapping and Geospatial Data in R"
+author: "Erika Rasnick"
+date: "September 4, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo=FALSE}
+library(tidyverse)
+```
+
+
+# Intro to Geopatial Data
+
+**Geospatial Data** can be defined as any data that is linked to a specific location on the surface of the Earth. 
+
+A lot of geospatial data is publicly available online.
+
+- [U.S. Census Data (NHGIS)](https://www.nhgis.org/)
+- [NASA Satellite Data](https://earthdata.nasa.gov/)
+- [National Land Cover Database](https://www.mrlc.gov/)
+- [Open Data Cincinnati](https://data.cincinnati-oh.gov/)
+- [CincyInsights](https://insights.cincinnati-oh.gov/stories/s/CincyInsights/s59x-yqy3/)
+
+# {`sf`}
+
+The [`sf` package](https://r-spatial.github.io/sf/index.html) provides simple features access for R. Simple features is a common storage and access model of mostly two-dimensional geometries (like points, lines, and polygons) used by geographic information systems.
+
+You can convert data associated with a specific latitude and longitude to an `sf` object, which is similar to a data frame, but with extra information about the geometry. 
+
+```{r}
+raw_data <- read_csv("simulated_case_locations.csv") 
+
+library(sf)
+d_events <- st_as_sf(raw_data, coords = c('X', 'Y')) %>% 
+    st_set_crs(4326)
+
+d_events
+```
+
+
+# {`tigris`}
+
+The [`tigris` package](https://github.com/walkerke/tigris) allows a user to directly download and use TIGER/Line shapefiles (including boundaries for states, counties, census tracts, etc.) from the U.S. Census Bureau in R. 
+
+For example, we can download the shapefile for the census tracts in Hamilton County, Ohio.
+
+```{r, echo=FALSE}
+library(tigris)
+options(tigris_class = 'sf')
+options(tigris_use_cache = TRUE)
+```
+
+```{r}
+hamilton_tracts <- tigris::tracts(state = '39', county = '61')
+```
+
+```{r, echo=FALSE}
+d_events <- st_transform(d_events, 3735)
+hamilton_tracts <- st_transform(hamilton_tracts, 3735)
+```
+
+We can perform a spatial join using `st_join()` from the `sf` package to overlay the points from our event data into their census tracts (i.e., "assign" each point to its census tract). Then we can calculate the number of events in each tract using `group_by()` and `summarize()` from the `tidyverse`. 
+
+```{r}
+d_events <- st_join(d_events, hamilton_tracts)
+
+d_tracts <- d_events %>% 
+    group_by(GEOID) %>% 
+    summarize(n_events = n()) %>% 
+    st_set_geometry(NULL)
+```
+
+```{r, echo=FALSE}
+d_tracts %>% filter(!is.na(GEOID))
+```
+
+# {`tidycensus`}
+
+The [`tidycensus` package](https://walkerke.github.io/tidycensus/) interfaces with the US Census Bureau’s decennial Census and five-year American Community APIs and returns tidyverse-ready data frames.
+
+For example, we can download the population under 18 of each census tract in Hamilton County.
+
+```{r, eval=FALSE}
+d_pop <- tidycensus::get_acs(geography = 'tract',
+                             variables = 'B09001_001E',
+                             year = 2016,
+                             state = 39, county = 61,
+                             geometry = TRUE) %>%
+    select(GEOID, n_children = estimate)
+```
+
+```{r, echo=FALSE, eval=FALSE}
+saveRDS(d_pop, "d_pop.rds")
+```
+
+```{r, echo=FALSE}
+d_pop <- readRDS("d_pop.rds")
+```
+
+```{r}
+d_pop
+```
+
+We can use this information to calculate the event rate per 1000 children in each tract.
+
+```{r}
+d <- left_join(d_pop, d_tracts, by = 'GEOID') %>% 
+    mutate(event_rate = n_events / n_children * 1000)
+d
+```
+
+
+# Mapping
+
+There are many different ways to visualize geospatial data in R. 
+
+First, we could use the plotting features of base R.
+
+```{r}
+plot(d['event_rate'])
+```
+
+# {`ggplot2`} and `geom_sf()`
+
+Using ggplot give us more flexibility and potential for customization, and is comfortable for those already familiar with ggplot functionality.
+
+```{r}
+ggplot() +
+  geom_sf(data=d, aes(fill=event_rate)) +
+  scale_fill_viridis_c() +
+  labs(fill="Event Rate") +
+  ggthemes::theme_map() +
+  theme(legend.position = c(0.9, 0))
+```
+
+
+# {`mapview`}
+
+The [`mapview` package](https://r-spatial.github.io/mapview/) is useful for quick and convenient interactive visualisations of spatial data. It was created to fill the gap of quick (not presentation grade) interactive plotting to examine and visually investigate both aspects of spatial data, the geometries and their attributes.
+
+```{r}
+mapview::mapview(d, zcol='event_rate')
+```
+
+
+# {`tmap`} : Static Mode
+
+The [`tmap` package](https://cran.r-project.org/web/packages/tmap/vignettes/tmap-getstarted.html) allows the user to thematic maps with great flexibility. The syntax for creating plots is similar to that of ggplot2, but tailored to maps.
+
+`tmap` has two modes. `plot` mode is useful for publication-ready static maps. 
+
+```{r}
+library(tmap)
+tmap_mode(mode='plot')
+
+tm1 <- tm_shape(d) +
+          tm_fill(col='event_rate', palette='viridis', title="Event Rate") +
+       tm_shape(d) + 
+          tm_borders() +
+       tm_layout(legend.position = c(0.9, 0),
+            frame = FALSE) +
+       tm_scale_bar(position = c(0,0)) +
+       tm_compass(position = c(0.05, 0.1), size = 3, lwd=1)
+```
+
+```{r, echo=FALSE, eval=FALSE}
+tmap_save(tm1, "tm-1.png")
+```
+
+<img src="tm-1.png" width="700"/>
+
+
+# {`tmap`} : Interactive Mode
+
+We can change `tmap_mode` to `view` and print interactively view the static map we created in the previous step.  This is similar to `mapview` but has more customizability.
+
+```{r}
+tmap_mode(mode='view')
+```
+
+```{r, echo=FALSE}
+tm1
+```
+
+
+# Bivariate Mapping
+
+```{r, echo=FALSE}
+dep_index <- 'https://github.com/cole-brokamp/dep_index/raw/master/ACS_deprivation_index_by_census_tracts.rds' %>% 
+  url() %>% 
+  gzcon() %>% 
+  readRDS() %>% 
+  as_tibble()
+
+d <- d %>% 
+  left_join(dep_index, by=c('GEOID' = 'census_tract_fips')) %>% 
+  st_transform(crs=3735)
+```
+
+# More {`tmap`}
+
+```{r}
+tmap_mode("plot")
+tm2 <- tm_shape(d) +
+          tm_polygons(c('event_rate', 'dep_index'),
+                      palette = list('Blues', 'Reds'),
+                      title=list("Event Rate", "Deprivation Index"),
+                      alpha=0.8) +
+       tm_facets(sync = TRUE, ncol=1) +
+       tm_layout(legend.position = c(0.9, 0),
+            frame = FALSE) +
+       tm_scale_bar(position = c(0,0)) +
+       tm_compass(position = c(0.05, 0.1), size = 3, lwd=1)
+tm2
+```
+
+```{r}
+tmap_mode("view")
+tm2
+```
+
+
+# {`biscale`}
+
+The [`biscale` package](https://slu-opengis.github.io/biscale/articles/biscale.html) uses features of `ggplot2` to create bivariate choropleth maps.
+
+```{r, eval=FALSE}
+library(biscale)
+d_biscale <- bi_class(d, x = dep_index, y = event_rate, style = "quantile", dim = 3)
+
+map <- ggplot() +
+  geom_sf(data = d_biscale, mapping = aes(fill = bi_class), color = "white", size = 0.1, show.legend = FALSE) +
+  bi_scale_fill(pal = "DkViolet", dim = 3) +
+  bi_theme() +
+  theme(title = element_text(size=15))
+
+legend <- bi_legend(pal = "DkViolet",
+                    dim = 3,
+                    xlab = "Higher Deprivation",
+                    ylab = "Higher Event Rate ",
+                    size = 8)
+```
+
+```{r, eval=FALSE}
+library(cowplot)
+b1 <- ggdraw() +
+  draw_plot(map, 0, 0, 1, 1) +
+  draw_plot(legend, 0, 0, 0.2, 0.5, vjust=0.1, hjust=-0.5)
+```
+
+```{r, echo=FALSE, eval=FALSE}
+ggsave("biscale-1.png", b1)
+```
+
+<img src="biscale-1.png" width="700"/>
